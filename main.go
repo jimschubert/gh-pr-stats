@@ -29,6 +29,11 @@ type boundaryPullRequest struct {
 	Duration int64
 }
 
+func (b *boundaryPullRequest) Update(pr *github.PullRequest, duration int64) {
+	b.PullRequest = pr
+	b.Duration = duration
+}
+
 func main() {
 	args, err := flags.Parse(&opts)
 	if err != nil {
@@ -60,26 +65,58 @@ func main() {
 	)
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
-
-	// TODO: List PRs
-	//opt := &github.RepositoryListOptions{Type: "all", Affiliation: "owner", ListOptions: github.ListOptions{PerPage: 300}}
-	//fmt.Println(opts.Owner)
-	//repos, _, err := client.Repositories.List(ctx, opts.Owner, opt)
-	//for _, repo := range repos {
-	//	fmt.Println(*repo.Name)
-	//}
-
+	
 	pullOpts := &github.PullRequestListOptions{
 		State:       "all",
 		Base:        "master",
 		Sort:        "created",
 		Direction:   "desc",
-		ListOptions: github.ListOptions{Page: 1, PerPage: 20},
+		ListOptions: github.ListOptions{Page: 1, PerPage: 50},
 	}
+
+	var shortest = &boundaryPullRequest{}
+	var longest = &boundaryPullRequest{}
+
+	// how many seconds PR has been open
+	var durations = make([]int64, 0)
+
+	for {
+		d, count, err := retrievePullRequests(client, pullOpts, shortest, longest, durations)
+		durations = d
+
+		if err != nil {
+			fmt.Printf("Error retrieving pull requests '%s.\n'", err)
+			os.Exit(1)
+		}
+
+		if count <= 0 {
+			break
+		}
+
+		pullOpts.Page = pullOpts.Page + 1
+	}
+
+	data := stats.LoadRawData(durations)
+	minimum, _ := stats.Min(data)
+	median, _ := stats.Median(data)
+	maximum, _ := stats.Max(data)
+
+	fmt.Printf("Minimum: %s\n", durafmt.Parse(time.Duration(int64(minimum))*time.Second))
+	fmt.Printf("Median: %s\n", durafmt.Parse(time.Duration(int64(median))*time.Second))
+	fmt.Printf("Maximum: %s\n", durafmt.Parse(time.Duration(int64(maximum))*time.Second))
+
+	if shortest.PullRequest != nil {
+		fmt.Printf("Shortest PR\n\tTitle: %s\n\tURL: %s\n", *shortest.PullRequest.Title, *shortest.PullRequest.URL)
+	}
+	if longest.PullRequest != nil {
+		fmt.Printf("Longest PR\n\tTitle: %s\n\tURL: %s\n", *longest.PullRequest.Title, *longest.PullRequest.URL)
+	}
+}
+
+func retrievePullRequests(client *github.Client, pullOpts *github.PullRequestListOptions, shortest *boundaryPullRequest, longest *boundaryPullRequest, durations []int64) ([]int64, int, error) {
 	pulls, _, err := client.PullRequests.List(context.Background(), opts.Owner, opts.Repo, pullOpts)
 	if err != nil {
-		fmt.Printf("Error retrieving pull requests '%s.\n'", err)
-		os.Exit(1)
+		return durations, 0, err
 	}
 
 	start, err := time.Parse("2006-01-02", opts.Start)
@@ -92,11 +129,6 @@ func main() {
 		end = time.Now()
 	}
 
-	// how many seconds PR has been open
-	durations := make([]int64, 0)
-
-	var shortest *boundaryPullRequest
-	var longest *boundaryPullRequest
 	for _, pull := range pulls {
 		if start.Unix() < pull.CreatedAt.Unix() && end.Unix() > pull.CreatedAt.Unix() {
 			var f int64
@@ -108,36 +140,20 @@ func main() {
 
 			durations = append(durations, f)
 
-			if shortest == nil || shortest.Duration > f {
-				shortest = &boundaryPullRequest{
-					PullRequest: pull,
-					Duration:    f,
-				}
+			if shortest.PullRequest == nil || f < shortest.Duration {
+				shortest.Update(pull, f)
 			}
-			if longest == nil || longest.Duration < f {
-				longest = &boundaryPullRequest{
-					PullRequest: pull,
-					Duration:    f,
-				}
+			if longest.PullRequest == nil || longest.Duration < f {
+				longest.Update(pull, f)
 			}
 
 			if opts.Verbose {
-				fmt.Printf("Pull (%s): %s closed after %f seconds\n", *pull.State, *pull.Title, f)
+				fmt.Printf("Pull (%s): %s closed after %d seconds\n", *pull.State, *pull.Title, f)
 			}
+		} else {
+			// we've hit a limit, stop processing
+			return durations, 0, nil
 		}
 	}
-
-	data := stats.LoadRawData(durations)
-	median, _ := stats.Median(data)
-	minimum, _ := stats.Min(data)
-	maximum, _ := stats.Max(data)
-	fmt.Printf("Median: %s\n", durafmt.Parse(time.Duration(int64(median))*time.Second))
-	fmt.Printf("Minimum: %s\n", durafmt.Parse(time.Duration(int64(minimum))*time.Second))
-	fmt.Printf("Maximum: %s\n", durafmt.Parse(time.Duration(int64(maximum))*time.Second))
-	if shortest != nil {
-		fmt.Printf("Shortest PR\n\tTitle: %s\n\tURL: %s\n", *shortest.PullRequest.Title, *shortest.PullRequest.URL)
-	}
-	if longest != nil {
-		fmt.Printf("Longest PR\n\tTitle: %s\n\tURL: %s\n", *longest.PullRequest.Title, *longest.PullRequest.URL)
-	}
+	return durations, len(pulls), nil
 }
