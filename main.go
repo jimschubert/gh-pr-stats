@@ -26,12 +26,93 @@ var opts struct {
 
 type boundaryPullRequest struct {
 	PullRequest *github.PullRequest
-	Duration int64
+	Duration    int64
 }
 
 func (b *boundaryPullRequest) Update(pr *github.PullRequest, duration int64) {
 	b.PullRequest = pr
 	b.Duration = duration
+}
+
+type pullRequestStats struct {
+	shortest    *boundaryPullRequest
+	longest     *boundaryPullRequest
+	durations   []int64
+	openCount   int32
+	closedCount int32
+}
+
+func (s *pullRequestStats) IncrementOpen() {
+	s.openCount = s.openCount + 1
+}
+
+func (s *pullRequestStats) IncrementClosed() {
+	s.closedCount = s.closedCount + 1
+}
+
+func (s *pullRequestStats) MergeDurations(durations []int64) {
+	if len(durations) > 0 {
+		s.durations = append(s.durations, durations...)
+	}
+}
+
+func NewPullRequestStats() *pullRequestStats {
+	return &pullRequestStats{
+		shortest:    &boundaryPullRequest{},
+		longest:     &boundaryPullRequest{},
+		durations:   make([]int64, 0),
+		openCount:   0,
+		closedCount: 0,
+	}
+}
+
+var start time.Time
+var end time.Time
+
+func retrievePullRequests(client *github.Client, pullOpts *github.PullRequestListOptions, prStats *pullRequestStats) (int, error) {
+	pulls, _, err := client.PullRequests.List(context.Background(), opts.Owner, opts.Repo, pullOpts)
+	if err != nil {
+		return 0, err
+	}
+
+	durations := make([]int64, 0)
+	for _, pull := range pulls {
+		if start.Unix() < pull.CreatedAt.Unix() && end.Unix() > pull.CreatedAt.Unix() {
+			var f int64
+			if pull.ClosedAt == nil {
+				f = time.Now().Unix() - pull.CreatedAt.Unix()
+			} else {
+				f = pull.ClosedAt.Unix() - pull.CreatedAt.Unix()
+			}
+
+			if *pull.State == "open" {
+				prStats.IncrementOpen()
+			} else {
+				prStats.IncrementClosed()
+			}
+
+			durations = append(durations, f)
+
+			if prStats.shortest.PullRequest == nil || f < prStats.shortest.Duration {
+				prStats.shortest.Update(pull, f)
+			}
+			if prStats.longest.PullRequest == nil || prStats.longest.Duration < f {
+				prStats.longest.Update(pull, f)
+			}
+
+			if opts.Verbose {
+				fmt.Printf("Pull (%s): %s closed after %d seconds\n", *pull.State, *pull.Title, f)
+			}
+
+			prStats.MergeDurations(durations)
+		} else {
+
+			prStats.MergeDurations(durations)
+			// we've hit a limit, stop processing
+			return 0, nil
+		}
+	}
+	return len(pulls), nil
 }
 
 func main() {
@@ -54,6 +135,16 @@ func main() {
 		return
 	}
 
+	start, err = time.Parse("2006-01-02", opts.Start)
+	if err != nil {
+		start = time.Unix(0, 0)
+	}
+
+	end, err = time.Parse("2006-01-02", opts.End)
+	if err != nil {
+		end = time.Now()
+	}
+
 	ctx := context.Background()
 	token, found := os.LookupEnv("GITHUB_TOKEN")
 	if !found {
@@ -65,7 +156,7 @@ func main() {
 	)
 	tc := oauth2.NewClient(ctx, ts)
 	client := github.NewClient(tc)
-	
+
 	pullOpts := &github.PullRequestListOptions{
 		State:       "all",
 		Base:        "master",
@@ -74,15 +165,10 @@ func main() {
 		ListOptions: github.ListOptions{Page: 1, PerPage: 50},
 	}
 
-	var shortest = &boundaryPullRequest{}
-	var longest = &boundaryPullRequest{}
-
-	// how many seconds PR has been open
-	var durations = make([]int64, 0)
+	prStats := NewPullRequestStats()
 
 	for {
-		d, count, err := retrievePullRequests(client, pullOpts, shortest, longest, durations)
-		durations = d
+		count, err := retrievePullRequests(client, pullOpts, prStats)
 
 		if err != nil {
 			fmt.Printf("Error retrieving pull requests '%s.\n'", err)
@@ -96,64 +182,21 @@ func main() {
 		pullOpts.Page = pullOpts.Page + 1
 	}
 
-	data := stats.LoadRawData(durations)
+	data := stats.LoadRawData(prStats.durations)
 	minimum, _ := stats.Min(data)
 	median, _ := stats.Median(data)
 	maximum, _ := stats.Max(data)
 
-	fmt.Printf("Minimum: %s\n", durafmt.Parse(time.Duration(int64(minimum))*time.Second))
-	fmt.Printf("Median: %s\n", durafmt.Parse(time.Duration(int64(median))*time.Second))
-	fmt.Printf("Maximum: %s\n", durafmt.Parse(time.Duration(int64(maximum))*time.Second))
+	fmt.Printf("Pull Requests:\n\tOpen: %d\n\tClosed: %d\n", prStats.openCount, prStats.closedCount)
+	fmt.Printf("Stats:\n")
+	fmt.Printf("\tMinimum: %s\n", durafmt.Parse(time.Duration(int64(minimum))*time.Second))
+	fmt.Printf("\tMedian: %s\n", durafmt.Parse(time.Duration(int64(median))*time.Second))
+	fmt.Printf("\tMaximum: %s\n", durafmt.Parse(time.Duration(int64(maximum))*time.Second))
 
-	if shortest.PullRequest != nil {
-		fmt.Printf("Shortest PR\n\tTitle: %s\n\tURL: %s\n", *shortest.PullRequest.Title, *shortest.PullRequest.URL)
+	if prStats.shortest.PullRequest != nil {
+		fmt.Printf("Shortest PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.shortest.PullRequest.Title, *prStats.shortest.PullRequest.HTMLURL, prStats.shortest.PullRequest.GetUser().GetLogin())
 	}
-	if longest.PullRequest != nil {
-		fmt.Printf("Longest PR\n\tTitle: %s\n\tURL: %s\n", *longest.PullRequest.Title, *longest.PullRequest.URL)
+	if prStats.longest.PullRequest != nil {
+		fmt.Printf("Longest PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.longest.PullRequest.Title, *prStats.longest.PullRequest.HTMLURL, prStats.shortest.PullRequest.GetUser().GetLogin())
 	}
-}
-
-func retrievePullRequests(client *github.Client, pullOpts *github.PullRequestListOptions, shortest *boundaryPullRequest, longest *boundaryPullRequest, durations []int64) ([]int64, int, error) {
-	pulls, _, err := client.PullRequests.List(context.Background(), opts.Owner, opts.Repo, pullOpts)
-	if err != nil {
-		return durations, 0, err
-	}
-
-	start, err := time.Parse("2006-01-02", opts.Start)
-	if err != nil {
-		start = time.Unix(0, 0)
-	}
-
-	end, err := time.Parse("2006-01-02", opts.End)
-	if err != nil {
-		end = time.Now()
-	}
-
-	for _, pull := range pulls {
-		if start.Unix() < pull.CreatedAt.Unix() && end.Unix() > pull.CreatedAt.Unix() {
-			var f int64
-			if pull.ClosedAt == nil {
-				f = time.Now().Unix() - pull.CreatedAt.Unix()
-			} else {
-				f = pull.ClosedAt.Unix() - pull.CreatedAt.Unix()
-			}
-
-			durations = append(durations, f)
-
-			if shortest.PullRequest == nil || f < shortest.Duration {
-				shortest.Update(pull, f)
-			}
-			if longest.PullRequest == nil || longest.Duration < f {
-				longest.Update(pull, f)
-			}
-
-			if opts.Verbose {
-				fmt.Printf("Pull (%s): %s closed after %d seconds\n", *pull.State, *pull.Title, f)
-			}
-		} else {
-			// we've hit a limit, stop processing
-			return durations, 0, nil
-		}
-	}
-	return durations, len(pulls), nil
 }
