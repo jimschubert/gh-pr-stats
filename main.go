@@ -21,6 +21,8 @@ var opts struct {
 
 	End string `short:"e" long:"end" description:"End date in format YYYY-mm-dd"`
 
+	Enterprise string `long:"enterprise" description:"GitHub Enterprise URL in the format http(s)://[hostname]/api/v3"`
+
 	Verbose bool `long:"verbose" description:"Display verbose messages"`
 }
 
@@ -155,7 +157,13 @@ func main() {
 		&oauth2.Token{AccessToken: token},
 	)
 	tc := oauth2.NewClient(ctx, ts)
-	client := github.NewClient(tc)
+
+	var client *github.Client
+	if len(opts.Enterprise) > 0 {
+		client, err = github.NewEnterpriseClient(opts.Enterprise, opts.Enterprise, tc)
+	} else {
+		client = github.NewClient(tc)
+	}
 
 	pullOpts := &github.PullRequestListOptions{
 		State:       "all",
@@ -188,15 +196,15 @@ func main() {
 	maximum, _ := stats.Max(data)
 
 	fmt.Printf("Pull Requests:\n\tOpen: %d\n\tClosed: %d\n", prStats.openCount, prStats.closedCount)
-	fmt.Printf("Stats:\n")
+	fmt.Printf("Open Duration:\n")
 	fmt.Printf("\tMinimum: %s\n", durafmt.Parse(time.Duration(int64(minimum))*time.Second))
 	fmt.Printf("\tMedian: %s\n", durafmt.Parse(time.Duration(int64(median))*time.Second))
 	fmt.Printf("\tMaximum: %s\n", durafmt.Parse(time.Duration(int64(maximum))*time.Second))
 
 	if prStats.shortest.PullRequest != nil {
-		fmt.Printf("Shortest PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.shortest.PullRequest.Title, *prStats.shortest.PullRequest.HTMLURL, prStats.shortest.PullRequest.GetUser().GetLogin())
+		fmt.Printf("Shortest-lived PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.shortest.PullRequest.Title, *prStats.shortest.PullRequest.HTMLURL, prStats.shortest.PullRequest.GetUser().GetLogin())
 	}
 	if prStats.longest.PullRequest != nil {
-		fmt.Printf("Longest PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.longest.PullRequest.Title, *prStats.longest.PullRequest.HTMLURL, prStats.shortest.PullRequest.GetUser().GetLogin())
+		fmt.Printf("Longest-lived PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.longest.PullRequest.Title, *prStats.longest.PullRequest.HTMLURL, prStats.shortest.PullRequest.GetUser().GetLogin())
 	}
 }
