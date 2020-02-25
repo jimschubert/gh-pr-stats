@@ -7,15 +7,21 @@ import (
 	"github.com/hako/durafmt"
 	"github.com/montanaflynn/stats"
 	"os"
+	"strings"
 	"time"
 )
 import "golang.org/x/oauth2"
 import "github.com/jessevdk/go-flags"
 
-var opts struct {
-	Owner string `short:"o" long:"owner" description:"GitHub Owner/Org name"`
+var version = ""
+var date = ""
+var commit = ""
+var projectName = ""
 
-	Repo string `short:"r" long:"repo" description:"GitHub Repo name"`
+var opts struct {
+	Owner string `short:"o" long:"owner" description:"GitHub Owner/Org name (required)" required:"true"`
+
+	Repo string `short:"r" long:"repo" description:"GitHub Repo name (required)" required:"true"`
 
 	Start string `short:"s" long:"start" description:"Start date in format YYYY-mm-dd"`
 
@@ -24,6 +30,8 @@ var opts struct {
 	Enterprise string `long:"enterprise" description:"GitHub Enterprise URL in the format http(s)://[hostname]/api/v3"`
 
 	Verbose bool `long:"verbose" description:"Display verbose messages"`
+
+	Version bool `short:"v" long:"version" description:"Display version information"`
 }
 
 type boundaryPullRequest struct {
@@ -117,23 +125,34 @@ func retrievePullRequests(client *github.Client, pullOpts *github.PullRequestLis
 	return len(pulls), nil
 }
 
+const parseArgs = flags.HelpFlag | flags.PassDoubleDash
+
 func main() {
-	args, err := flags.Parse(&opts)
+	parser := flags.NewParser(&opts, parseArgs)
+	args, err := parser.Parse()
 	if err != nil {
 		flagError := err.(*flags.Error)
 		if flagError.Type == flags.ErrHelp {
+			parser.WriteHelp(os.Stdout)
 			return
 		}
+
 		if flagError.Type == flags.ErrUnknownFlag {
-			fmt.Println("Unknown flag. Please use --help for available options.")
+			_, _ = fmt.Fprintf(os.Stderr, "%s. Please use --help for available options.\n", strings.Replace(flagError.Message, "unknown", "Unknown", 1))
 			return
 		}
-		fmt.Printf("Error parsing command line options: %s\n", err)
+		_, _ = fmt.Fprintf(os.Stderr, "Error parsing command line options: %s\n", err)
 		return
 	}
+
+	if opts.Version {
+		fmt.Printf("%s %s (%s)\n", projectName, version, commit)
+		return
+	}
+
 	// only accept switches, no args
 	if len(args) > 0 {
-		fmt.Printf("Unknown command line argument '%s'.\n", args[0])
+		_, _ = fmt.Fprintf(os.Stderr, "Unknown command line argument '%s'.\n", args[0])
 		return
 	}
 
