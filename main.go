@@ -205,6 +205,6 @@ func main() {
 		fmt.Printf("Shortest-lived PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.shortest.PullRequest.Title, *prStats.shortest.PullRequest.HTMLURL, prStats.shortest.PullRequest.GetUser().GetLogin())
 	}
 	if prStats.longest.PullRequest != nil {
-		fmt.Printf("Longest-lived PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.longest.PullRequest.Title, *prStats.longest.PullRequest.HTMLURL, prStats.shortest.PullRequest.GetUser().GetLogin())
+		fmt.Printf("Longest-lived PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.longest.PullRequest.Title, *prStats.longest.PullRequest.HTMLURL, prStats.longest.PullRequest.GetUser().GetLogin())
 	}
 }
