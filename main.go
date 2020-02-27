@@ -87,7 +87,7 @@ func retrievePullRequests(client *github.Client, pullOpts *github.PullRequestLis
 
 	durations := make([]int64, 0)
 	for _, pull := range pulls {
-		if start.Unix() < pull.CreatedAt.Unix() && end.Unix() > pull.CreatedAt.Unix() {
+		if start.Unix() < pull.CreatedAt.Unix() && pull.CreatedAt.Unix() < end.Unix() {
 			var f int64
 			if pull.ClosedAt == nil {
 				f = time.Now().Unix() - pull.CreatedAt.Unix()
