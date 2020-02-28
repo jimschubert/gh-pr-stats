@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"gh-pr-stats/model"
 	"github.com/google/go-github/v29/github"
 	"github.com/hako/durafmt"
+	"github.com/jszwec/csvutil"
 	"github.com/montanaflynn/stats"
 	"os"
 	"strings"
@@ -29,58 +31,25 @@ var opts struct {
 
 	Enterprise string `long:"enterprise" description:"GitHub Enterprise URL in the format http(s)://[hostname]/api/v3"`
 
+	CSV bool `long:"csv" description:"Dump the full pr details output to stdout as CSV for stats processing by other tools"`
+
 	Verbose bool `long:"verbose" description:"Display verbose messages"`
 
 	Version bool `short:"v" long:"version" description:"Display version information"`
 }
 
-type boundaryPullRequest struct {
-	PullRequest *github.PullRequest
-	Duration    int64
-}
-
-func (b *boundaryPullRequest) Update(pr *github.PullRequest, duration int64) {
-	b.PullRequest = pr
-	b.Duration = duration
-}
-
-type pullRequestStats struct {
-	shortest    *boundaryPullRequest
-	longest     *boundaryPullRequest
-	durations   []int64
-	openCount   int32
-	closedCount int32
-}
-
-func (s *pullRequestStats) IncrementOpen() {
-	s.openCount = s.openCount + 1
-}
-
-func (s *pullRequestStats) IncrementClosed() {
-	s.closedCount = s.closedCount + 1
-}
-
-func (s *pullRequestStats) MergeDurations(durations []int64) {
-	if len(durations) > 0 {
-		s.durations = append(s.durations, durations...)
-	}
-}
-
-func NewPullRequestStats() *pullRequestStats {
-	return &pullRequestStats{
-		shortest:    &boundaryPullRequest{},
-		longest:     &boundaryPullRequest{},
-		durations:   make([]int64, 0),
-		openCount:   0,
-		closedCount: 0,
-	}
-}
-
 var start time.Time
 var end time.Time
 
-func retrievePullRequests(client *github.Client, pullOpts *github.PullRequestListOptions, prStats *pullRequestStats) (int, error) {
-	pulls, _, err := client.PullRequests.List(context.Background(), opts.Owner, opts.Repo, pullOpts)
+func newContext(c context.Context) (context.Context, context.CancelFunc) {
+	 timeout, cancel := context.WithTimeout(c, 15 * time.Second)
+	 return timeout, cancel
+}
+
+func retrievePullRequests(client *github.Client, pullOpts *github.PullRequestListOptions, prStats *model.PullRequestStats, details *[]*model.PullRequestDetails) (int, error) {
+	ctx, cancel := newContext(context.Background())
+	defer cancel()
+	pulls, _, err := client.PullRequests.List(ctx, opts.Owner, opts.Repo, pullOpts)
 	if err != nil {
 		return 0, err
 	}
@@ -88,6 +57,12 @@ func retrievePullRequests(client *github.Client, pullOpts *github.PullRequestLis
 	durations := make([]int64, 0)
 	for _, pull := range pulls {
 		if start.Unix() < pull.CreatedAt.Unix() && pull.CreatedAt.Unix() < end.Unix() {
+			if opts.CSV {
+				pr := model.PullRequestDetails{}
+				pr.FromGitHubPullRequest(pull)
+				*details = append(*details, &pr)
+			}
+
 			var f int64
 			if pull.ClosedAt == nil {
 				f = time.Now().Unix() - pull.CreatedAt.Unix()
@@ -103,11 +78,11 @@ func retrievePullRequests(client *github.Client, pullOpts *github.PullRequestLis
 
 			durations = append(durations, f)
 
-			if prStats.shortest.PullRequest == nil || f < prStats.shortest.Duration {
-				prStats.shortest.Update(pull, f)
+			if prStats.Shortest.PullRequest == nil || f < prStats.Shortest.Duration {
+				prStats.Shortest.Update(pull, f)
 			}
-			if prStats.longest.PullRequest == nil || prStats.longest.Duration < f {
-				prStats.longest.Update(pull, f)
+			if prStats.Longest.PullRequest == nil || prStats.Longest.Duration < f {
+				prStats.Longest.Update(pull, f)
 			}
 
 			if opts.Verbose {
@@ -192,10 +167,11 @@ func main() {
 		ListOptions: github.ListOptions{Page: 1, PerPage: 50},
 	}
 
-	prStats := NewPullRequestStats()
+	prStats := model.NewPullRequestStats()
 
+	details := make([]*model.PullRequestDetails, 0)
 	for {
-		count, err := retrievePullRequests(client, pullOpts, prStats)
+		count, err := retrievePullRequests(client, pullOpts, prStats, &details)
 
 		if err != nil {
 			fmt.Printf("Error retrieving pull requests '%s.\n'", err)
@@ -209,21 +185,29 @@ func main() {
 		pullOpts.Page = pullOpts.Page + 1
 	}
 
-	data := stats.LoadRawData(prStats.durations)
-	minimum, _ := stats.Min(data)
-	median, _ := stats.Median(data)
-	maximum, _ := stats.Max(data)
+	if opts.CSV {
+		b, err := csvutil.Marshal(details)
+		if err != nil {
+			fmt.Println("error:", err)
+		}
+		fmt.Println(string(b))
+	} else {
+		data := stats.LoadRawData(prStats.Durations)
+		minimum, _ := stats.Min(data)
+		median, _ := stats.Median(data)
+		maximum, _ := stats.Max(data)
 
-	fmt.Printf("Pull Requests:\n\tOpen: %d\n\tClosed: %d\n", prStats.openCount, prStats.closedCount)
-	fmt.Printf("Open Duration:\n")
-	fmt.Printf("\tMinimum: %s\n", durafmt.Parse(time.Duration(int64(minimum))*time.Second))
-	fmt.Printf("\tMedian: %s\n", durafmt.Parse(time.Duration(int64(median))*time.Second))
-	fmt.Printf("\tMaximum: %s\n", durafmt.Parse(time.Duration(int64(maximum))*time.Second))
+		fmt.Printf("Pull Requests:\n\tOpen: %d\n\tClosed: %d\n", prStats.OpenCount, prStats.ClosedCount)
+		fmt.Printf("Open Duration:\n")
+		fmt.Printf("\tMinimum: %s\n", durafmt.Parse(time.Duration(int64(minimum))*time.Second))
+		fmt.Printf("\tMedian: %s\n", durafmt.Parse(time.Duration(int64(median))*time.Second))
+		fmt.Printf("\tMaximum: %s\n", durafmt.Parse(time.Duration(int64(maximum))*time.Second))
 
-	if prStats.shortest.PullRequest != nil {
-		fmt.Printf("Shortest-lived PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.shortest.PullRequest.Title, *prStats.shortest.PullRequest.HTMLURL, prStats.shortest.PullRequest.GetUser().GetLogin())
-	}
-	if prStats.longest.PullRequest != nil {
-		fmt.Printf("Longest-lived PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.longest.PullRequest.Title, *prStats.longest.PullRequest.HTMLURL, prStats.longest.PullRequest.GetUser().GetLogin())
+		if prStats.Shortest.PullRequest != nil {
+			fmt.Printf("Shortest-lived PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.Shortest.PullRequest.Title, *prStats.Shortest.PullRequest.HTMLURL, prStats.Shortest.PullRequest.GetUser().GetLogin())
+		}
+		if prStats.Longest.PullRequest != nil {
+			fmt.Printf("Longest-lived PR:\n\tTitle: %s\n\tURL: %s\n\tAuthor: %s\n", *prStats.Longest.PullRequest.Title, *prStats.Longest.PullRequest.HTMLURL, prStats.Longest.PullRequest.GetUser().GetLogin())
+		}
 	}
 }
